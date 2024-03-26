@@ -1,6 +1,6 @@
 CARNet
 
-Coordinate Attention Residual Block Network for Hige Resolution Image Segmentation
+Coordinate Attention Residual Block Network for High Resolution Image Segmentation
 
 contact: seonghobaek@gmail.com
 
