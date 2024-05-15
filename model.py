@@ -17,7 +17,6 @@ from sklearn.utils import shuffle
 import layers
 import argparse
 import time
-import util
 
 # scope
 SEGMENT_Encoder_scope = 'segment_encoder'
