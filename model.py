@@ -213,8 +213,8 @@ def get_residual_loss(value, target, type='l1', alpha=1.0):
         eps = 1e-10
         q = tf.math.maximum(1 - value, eps)
         p = tf.math.maximum(value, eps)
-        pos_loss = -(q ** 2) * tf.math.log(p)
-        neg_loss = -(p ** 2) * tf.math.log(q)
+        pos_loss = -(q ** 4) * tf.math.log(p)
+        neg_loss = -(p ** 4) * tf.math.log(q)
         f_loss = tf.reduce_mean(target * pos_loss + (1 - target) * neg_loss)
         l1_loss = tf.reduce_mean(tf.abs(tf.subtract(target, value)))
         loss = f_loss + l1_loss
@@ -268,11 +268,13 @@ def segment_encoder(in_tensor, activation=tf.nn.relu, norm='instance', scope='un
 
         l = layers.conv(in_tensor, scope='init_512', filter_dims=[7, 7, 4 * segment_unit_block_depth],
                         stride_dims=[2, 2], non_linear_fn=activation)
-
         l = layers.conv(l, scope='init_512_squeeze', filter_dims=[1, 1, segment_unit_block_depth],
                         stride_dims=[1, 1], non_linear_fn=None)
         l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='init_norm_512')
         l = activation(l)
+
+        l = layers.add_residual_block(l, filter_dims=[3, 3, segment_unit_block_depth], norm=norm,
+                                  b_train=b_train, act_func=activation, scope='resblock512')
 
         print(' Add Lateral: ' + str(l.get_shape().as_list()))
         lateral_layers.append(l)
@@ -284,6 +286,9 @@ def segment_encoder(in_tensor, activation=tf.nn.relu, norm='instance', scope='un
                             non_linear_fn=None)
             l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='encoder_norm1_' + str(i))
             l = activation(l)
+
+            l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], norm=norm,
+                                          b_train=b_train, act_func=activation, scope='resblock_dnsample_' + str(i))
 
             print(' Add Lateral: ' + str(l.get_shape().as_list()))
             lateral_layers.append(l)
@@ -299,7 +304,7 @@ def segment_encoder(in_tensor, activation=tf.nn.relu, norm='instance', scope='un
                     lateral_head2 = layers.add_residual_block(lateral_head2, filter_dims=[3, 3, c], norm=norm,
                                                   b_train=b_train, act_func=activation,
                                                   scope='loop_sqblock_' + str(n_loop) + str(i) + str(num_rblock))
-                lateral_head2 = layers.ca_block(lateral_head2, scope='car_' + str(n_loop) + str(i))
+                lateral_head2 = layers.ca_block(lateral_head2, act_func=activation, scope='car_' + str(n_loop) + str(i))
 
                 lateral_layers[i] = tf.concat([lateral_head1, lateral_head2], axis=-1)
 
@@ -314,7 +319,7 @@ def segment_encoder(in_tensor, activation=tf.nn.relu, norm='instance', scope='un
                 for j in range(len(lateral_layers)):
                     if i != j:
                         l_lat = lateral_layers[j]
-                        _, h, w, _ = l_lat.get_shape().as_list()
+                        _, h, w, c = l_lat.get_shape().as_list()
 
                         if l_h > h:
                             # Resize
@@ -326,14 +331,17 @@ def segment_encoder(in_tensor, activation=tf.nn.relu, norm='instance', scope='un
                             l_lat = activation(l_lat)
                             l_lat = tf.image.resize_images(l_lat, size=[l_h, l_w])
                         elif l_h < h:
+                            # Downsample
                             ratio = h // l_h
                             num_downsample = int(np.log2(ratio))
+
                             for k in range(num_downsample):
                                 l_lat = layers.conv(l_lat,
                                                     scope='shuffling_dn_' + str(n_loop) + str(i) + str(j) + str(k),
                                                     filter_dims=[5, 5, l_c], stride_dims=[2, 2], non_linear_fn=None)
                                 l_lat = layers.conv_normalize(l_lat, norm=norm, b_train=b_train,
-                                                              scope='shuffling_dn_norm' + str(n_loop) + str(i) + str(j) + str(k))
+                                                              scope='shuffling_dn_norm' + str(n_loop) + str(i) +
+                                                                    str(j) + str(k))
                             l_lat = activation(l_lat)
 
                         mixed_layer = tf.add(mixed_layer, l_lat)
@@ -355,7 +363,6 @@ def segment_decoder(lateral_layers, skip_layers, activation=tf.nn.relu, norm='in
                     b_train=False):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
         print('Segment Decoder')
-        segment_block_depth = segment_unit_block_depth // 2
 
         lateral_map = lateral_layers[-1]
         _, h, w, c = lateral_map.get_shape().as_list()
@@ -383,14 +390,14 @@ def segment_decoder(lateral_layers, skip_layers, activation=tf.nn.relu, norm='in
         k = np.log2(h) // 2
         k = k + ((k + 1) % 2)
         MP = tf.nn.max_pool(lateral_map, ksize=[1, k, k, 1], strides=[1, 1, 1, 1], padding='SAME')
-        #p1 = layers.avg_pool(MP, filter_dims=[h, w], stride_dims=[h, w])
-        #p1 = layers.conv(p1, scope='p1_bt', filter_dims=[1, 1, c // 8],
-        #                 stride_dims=[1, 1], non_linear_fn=activation)
-        #p1 = tf.image.resize_images(p1, size=[h, w])
-        p2 = layers.avg_pool(MP, filter_dims=[h // 4, w // 4], stride_dims=[h // 4, w // 4])
-        p2 = layers.conv(p2, scope='p2_bt', filter_dims=[1, 1, c // 8],
+        p1 = layers.avg_pool(MP, filter_dims=[h // 4, w // 4], stride_dims=[h // 4, w // 4])
+        p1 = layers.conv(p1, scope='p1_bt', filter_dims=[1, 1, c // 8],
                          stride_dims=[1, 1], non_linear_fn=activation)
-        p2 = tf.image.resize_images(p2, size=[h, w])
+        p1 = tf.image.resize_images(p1, size=[h, w])
+        #p2 = layers.avg_pool(MP, filter_dims=[h // 8, w // 8], stride_dims=[h // 8, w // 8])
+        #p2 = layers.conv(p2, scope='p2_bt', filter_dims=[1, 1, c // 8],
+        #                 stride_dims=[1, 1], non_linear_fn=activation)
+        #p2 = tf.image.resize_images(p2, size=[h, w])
         p3 = layers.avg_pool(MP, filter_dims=[h // 16, w // 16], stride_dims=[h // 16, w // 16])
         p3 = layers.conv(p3, scope='p3_bt', filter_dims=[1, 1, c // 8],
                          stride_dims=[1, 1], non_linear_fn=activation)
@@ -407,40 +414,46 @@ def segment_decoder(lateral_layers, skip_layers, activation=tf.nn.relu, norm='in
         p6 = layers.conv(p6, scope='p6_bt', filter_dims=[1, 1, c // 8],
                          stride_dims=[1, 1], non_linear_fn=activation)
         p6 = tf.image.resize_images(p6, size=[h, w])
-        psp_map = tf.concat([p2, p3, p4, p5, p6], axis=-1)
+        psp_map = tf.concat([p1, p3, p4, p5, p6], axis=-1)
 
         # Adaptive Pyramid Pooling
         ada_psp_map = layers.conv(psp_map, scope='ada_psp', filter_dims=[1, 1, 5],
                                   stride_dims=[1, 1], non_linear_fn=activation)
         ada_psp_map = tf.nn.softmax(ada_psp_map, axis=-1)
-        w2, w3, w4, w5, w6 = tf.split(ada_psp_map, 5, axis=-1)
-        psp_map = w2 * p2 + w3 * p3 + w4 * p4 + w5 * p5 + w6 * p6
-
+        w1, w3, w4, w5, w6 = tf.split(ada_psp_map, 5, axis=-1)
+        psp_map = w1 * p1 + w3 * p3 + w4 * p4 + w5 * p5 + w6 * p6
         psp_lateral = tf.concat([lateral_map, psp_map], axis=-1)
-        psp_lateral = layers.conv(psp_lateral, scope='psp_lateral_conv', filter_dims=[1, 1, segment_unit_block_depth],
+        psp_lateral = layers.conv(psp_lateral, scope='psp_lateral_concat_conv', filter_dims=[1, 1, segment_unit_block_depth],
                                   stride_dims=[1, 1], non_linear_fn=activation)
+        psp_lateral = layers.conv(psp_lateral, scope='psp_lateral_refine', filter_dims=[3, 3, segment_unit_block_depth],
+                                  stride_dims=[1, 1], non_linear_fn=None)
+        psp_lateral = layers.conv_normalize(psp_lateral, norm=norm, b_train=b_train,
+                                            scope='psp_lateral_refine_norm')
+        psp_lateral = activation(psp_lateral)
 
         segment_small = layers.conv(psp_lateral, scope='segment_output_small_1', filter_dims=[1, 1, 8],
                                     stride_dims=[1, 1], non_linear_fn=activation)
-        segment_small = layers.conv(segment_small, scope='segment_output_small_2', filter_dims=[1, 1, 1],
+        segment_small_map = layers.conv(segment_small, scope='segment_output_small_2', filter_dims=[1, 1, 1],
                                     stride_dims=[1, 1], non_linear_fn=tf.nn.sigmoid)
 
         r = input_height // h
-        lateral_map = layers.conv(psp_lateral, scope='upsacle_conv_average_map',
-                                  filter_dims=[3, 3, r * r * segment_block_depth],
+        segment_high = layers.conv(psp_lateral, scope='upsacle_conv_average_map',
+                                  filter_dims=[3, 3, r * r * segment_unit_block_depth],
                                   stride_dims=[1, 1], non_linear_fn=activation)
-        lateral_map = tf.nn.depth_to_space(lateral_map, r)
+        segment_high = tf.nn.depth_to_space(segment_high, r)
+        segment_high = layers.conv(segment_high, scope='final_refine',
+                                    filter_dims=[3, 3, segment_unit_block_depth],
+                                    stride_dims=[1, 1], non_linear_fn=None)
+        segment_high = layers.conv_normalize(segment_high, norm=norm, b_train=b_train,
+                                            scope='segment_high_refine_norm')
+        segment_high = activation(segment_high)
 
-        segment_layer = layers.conv(lateral_map, scope='final_refine',
-                                    filter_dims=[3, 3, segment_block_depth],
-                                    stride_dims=[1, 1], non_linear_fn=activation)
-
-        segment_layer = layers.conv(segment_layer, scope='segment_output_1', filter_dims=[1, 1, 8],
-                                    stride_dims=[1, 1], non_linear_fn=activation)
-        segment_layer = layers.conv(segment_layer, scope='segment_output_2', filter_dims=[1, 1, 1],
+        segment_high = layers.conv(segment_high, scope='segment_high1', filter_dims=[1, 1, 8],
+                                  stride_dims=[1, 1], non_linear_fn=activation)
+        segment_map = layers.conv(segment_high, scope='segment_high2', filter_dims=[1, 1, 1],
                                     stride_dims=[1, 1], non_linear_fn=tf.nn.sigmoid)
 
-    return segment_layer, segment_small
+    return segment_map, segment_small_map
 
 
 def categorical_sample(logits):
@@ -499,11 +512,11 @@ def train(model_path='None', mode='train'):
                                          activation=layers.swish, b_train=B_TRAIN)
     U_G_X, U_G_X_Small = segment_decoder(laterals, features, norm='instance', activation=layers.swish,
                                          scope=SEGMENT_Decoder_scope, b_train=B_TRAIN)
-
     print('Segment decoder images: ' + str(U_G_X.get_shape().as_list()))
     segment_residual_loss = 0.0
     S_IN_Small = tf.image.resize_images(S_IN, size=[input_height // 2, input_width // 2])
-    segment_residual_loss += get_residual_loss(U_G_X_Small, S_IN_Small, type='focal')
+
+    segment_residual_loss += get_residual_loss(U_G_X_Small, S_IN_Small, type='focal')  # Deep Supervision
     #segment_residual_loss += get_residual_loss(U_G_X_Small, S_IN_Small, type='ft', alpha=0.7)
     segment_residual_loss += get_residual_loss(U_G_X, S_IN, type='l1_focal')
     segment_residual_loss += get_residual_loss(U_G_X, S_IN, type='ft', alpha=0.7)
