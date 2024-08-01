@@ -818,7 +818,7 @@ def se_block(input, num_channel_out=-1, b_multiply=True, ratio=8, scope='squeeze
         return sl
 
 
-def ca_block(input, ratio=8, scope='cord_attention'):
+def ca_block(input, ratio=8, act_func=tf.nn.relu, scope='cord_attention'):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
         _, h, w, c = input.get_shape().as_list()
         k = np.log2(c) // 2
@@ -834,7 +834,7 @@ def ca_block(input, ratio=8, scope='cord_attention'):
         # print('transpose w: ' + str(l_w.get_shape().as_list()))
         l_c = tf.concat([l_h, l_w], axis=1)
         l_c = conv(l_c, scope='squeeze', filter_dims=[1, 1, c // ratio], stride_dims=[1, 1],
-                   non_linear_fn=tf.nn.relu)
+                   non_linear_fn=act_func)
         # print('squeeze: ' + str(l_c.get_shape().as_list()))
         l_h, l_w = tf.split(l_c, num_or_size_splits=2, axis=1)
         l_w = tf.transpose(l_w, [0, 2, 1, 3])
