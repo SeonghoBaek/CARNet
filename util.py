@@ -1164,6 +1164,18 @@ def image_mean_std(dirs):
     return mean, std
 
 
+def gaussian_smoothing(img, kernel_size=4, sigma=1):
+    num_ch = tf.shape(img)[-1]
+    ax = tf.range(-kernel_size // 2 + 1.0, kernel_size // 2 + 1.0)
+    xx, yy = tf.meshgrid(ax, ax)
+    kernel = tf.exp(-(xx ** 2 + yy ** 2) / (2.0 * sigma ** 2))
+    kernel = kernel / tf.reduce_sum(kernel)
+    kernel = tf.tile(kernel[..., tf.newaxis], [1, 1, num_ch])
+    kernel = kernel[..., tf.newaxis]
+
+    return tf.nn.depthwise_conv2d(img, kernel, [1, 1, 1, 1], padding='SAME')
+
+
 if __name__ == '__main__':
     mean, std = image_mean_std('data/groups')
     print('mean: ' + str(mean) + ', std: ' + str(std))
