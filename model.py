@@ -18,12 +18,25 @@ import layers
 import argparse
 import time
 import util
+import logging
+
 
 # scope
 SEGMENT_Encoder_Init_scope = 'input_preprocess'
 SEGMENT_Encoder_scope = 'segment_encoder'
 SEGMENT_Decoder_scope = 'segment_decoder'
 SEGMENT_Decoder_Out_scope = 'final_map'
+SPARTIAL_Memory_scope = 'spatial_mem'
+
+
+logging.basicConfig(format='%(asctime)s %(levelname)s:%(message)s at %(funcName)s, line %(lineno)d',
+                    level=logging.INFO,
+                    datefmt='%m/%d/%Y %I:%M:%S %p')
+carnet_logger = logging.getLogger('carnet')
+encoder_logger = logging.getLogger('carnet.encoder')
+decoder_logger = logging.getLogger('carnet.decoder')
+train_logger = logging.getLogger('carnet.train')
+test_logger = logging.getLogger('carnet.test')
 
 
 def load_images(file_name_list, base_dir=None, noise_mask=None, cutout=False, cutout_mask=None,
@@ -40,7 +53,8 @@ def load_images(file_name_list, base_dir=None, noise_mask=None, cutout=False, cu
             img = cv2.imread(fullname)
 
             if img is None:
-                print('Load failed: ' + fullname)
+                carnet_logger.error('Load failed: ' + fullname)
+
                 return None
 
             if contrast is True:
@@ -51,7 +65,21 @@ def load_images(file_name_list, base_dir=None, noise_mask=None, cutout=False, cu
 
             if gray_scale is True:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            '''
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
+                if np.random.randint(0, 10) < 5:
+                    H, S, V = cv2.split(img)
+                    a_h = np.random.uniform(low=0.95, high=1.05)
+                    a_s = np.random.uniform(low=0.8, high=1.2)
+                    a_v = np.random.uniform(low=0.8, high=1.2)
+                    H = np.clip(H * a_h, 0, 180)
+                    S = np.clip(S * a_s, 0, 255)
+                    V = np.clip(V * a_v, 0, 255)
+                    img = cv2.merge([H, S, V])
+                    img = np.uint8(img)
+            '''
             if img is not None:
                 img = np.array(img) * 1.0
 
@@ -130,7 +158,6 @@ def load_images(file_name_list, base_dir=None, noise_mask=None, cutout=False, cu
                 else:
                     if noise_mask is not None:
                         cut_mask = noise_mask
-
                         # Segmentation Mode
                         seg_img = cut_mask
                         bg_img = (1.0 - seg_img) * img
@@ -164,7 +191,7 @@ def load_images(file_name_list, base_dir=None, noise_mask=None, cutout=False, cu
                 gt_images.append(n_gt_img)
 
     except cv2.error as e:
-        print(e)
+        carnet_logger.error(e)
         return None
 
     return np.array(images), np.array(gt_images), np.array(seg_images)
@@ -265,7 +292,8 @@ def get_residual_loss(value, target, type='l1', alpha=1.0):
 def segment_encoder_init(in_tensor, activation=tf.nn.relu, norm='instance', scope='segment_encoder_init',
                          b_train=False):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-        print('Segment encoder init: ' + str(in_tensor.get_shape().as_list()))
+        encoder_logger.info(str(in_tensor.get_shape().as_list()))
+
         l = layers.conv(in_tensor, scope='init_1024', filter_dims=[11, 11, segment_unit_block_depth],
                         stride_dims=[2, 2], non_linear_fn=activation)
         l = layers.conv(l, scope='init_512', filter_dims=[3, 3, 4 * segment_unit_block_depth],
@@ -280,13 +308,13 @@ def segment_encoder_init(in_tensor, activation=tf.nn.relu, norm='instance', scop
 
 def segment_encoder(in_tensor, activation=tf.nn.relu, norm='instance', scope='segment_encoder', b_train=False):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-        print('Segment encoder input: ' + str(in_tensor.get_shape().as_list()))
+        encoder_logger.info(str(in_tensor.get_shape().as_list()))
         block_depth = segment_unit_block_depth
         l = in_tensor
         lateral_layers = []
         feature_layers = []
 
-        print(' Add Lateral: ' + str(l.get_shape().as_list()))
+        encoder_logger.info(' Add Lateral: ' + str(l.get_shape().as_list()))
         lateral_layers.append(l)
         feature_layers.append(l)
 
@@ -299,7 +327,7 @@ def segment_encoder(in_tensor, activation=tf.nn.relu, norm='instance', scope='se
             l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='downsample_feature_norm_' + str(i))
             l = activation(l)
 
-            print(' Add Lateral: ' + str(l.get_shape().as_list()))
+            encoder_logger.info(' Add Lateral: ' + str(l.get_shape().as_list()))
             lateral_layers.append(l)
 
         for n_loop in range(num_shuffle_car):
@@ -309,22 +337,21 @@ def segment_encoder(in_tensor, activation=tf.nn.relu, norm='instance', scope='se
                 _, h, w, c = lateral_head2.get_shape().as_list()
 
                 for num_rblock in range(num_car):
-                    print(' Conv Layer: ' + str(lateral_layers[i].get_shape().as_list()))
+                    encoder_logger.info(' Conv Layer: ' + str(lateral_layers[i].get_shape().as_list()))
                     lateral_head2 = layers.add_residual_block(lateral_head2, filter_dims=[3, 3, c], norm=norm,
                                                               b_train=b_train, act_func=activation,
                                                               scope='loop_sqblock_' + str(n_loop) + str(i) + str(
                                                                   num_rblock))
                 lateral_head2 = layers.ca_block(lateral_head2, act_func=activation, scope='car_' + str(n_loop) + str(i))
-
                 lateral_layers[i] = tf.concat([lateral_head1, lateral_head2], axis=-1)
 
-            print('Shuffling...')
+            encoder_logger.info('Shuffling...')
             fused_layers = []
 
             for i in range(len(lateral_layers)):
                 _, l_h, l_w, l_c = lateral_layers[i].get_shape().as_list()
                 mixed_layer = lateral_layers[i]
-                print(' Shuffle to: ' + str(lateral_layers[i].get_shape().as_list()))
+                encoder_logger.info(' Shuffle to: ' + str(lateral_layers[i].get_shape().as_list()))
 
                 for j in range(len(lateral_layers)):
                     if i != j:
@@ -371,25 +398,33 @@ def segment_encoder(in_tensor, activation=tf.nn.relu, norm='instance', scope='se
 
 def segment_decoder_out(latent, activation=tf.nn.relu, norm='instance', scope='segment_decoder_out', b_train=False, b_smoothing=False):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-        print(scope)
         _, h, w, c = latent.get_shape().as_list()
+
+        latent = layers.ca_block(latent, act_func=activation, scope='segment_attention')
+
         segment_small = layers.conv(latent, scope='segment_output_small_1', filter_dims=[1, 1, 8],
                                     stride_dims=[1, 1], non_linear_fn=activation)
         segment_small_map = layers.conv(segment_small, scope='segment_output_small_2', filter_dims=[1, 1, 1],
                                         stride_dims=[1, 1], non_linear_fn=tf.nn.sigmoid)
-        r = input_height // h
+
+        #r = input_height // h
+        # For 1K
+        r = 2
         segment_high = layers.conv(latent, scope='upsacle_conv_average_map',
                                    filter_dims=[3, 3, r * r * segment_unit_block_depth],
-                                   stride_dims=[1, 1], non_linear_fn=activation)
+                                   stride_dims=[1, 1], non_linear_fn=None)
+        segment_high = layers.conv_normalize(segment_high, norm=norm, b_train=b_train, scope='segment_high_map_norm')
+        segment_high = activation(segment_high)
         segment_high = tf.nn.depth_to_space(segment_high, r)
-        _, high_h, high_w, high_c = segment_high.get_shape().as_list()
 
-        segment_high = layers.conv(segment_high, scope='segment_high1', filter_dims=[1, 1, 8],
+        segment_high = layers.conv(segment_high, scope='segment_high1', filter_dims=[1, 1, 16],
                                    stride_dims=[1, 1], non_linear_fn=activation)
-        segment_small_map_resize = tf.image.resize_images(segment_small_map, size=[high_h, high_w])
-        segment_high = tf.concat([segment_high, segment_small_map_resize], axis=-1)
+        #segment_high = layers.ca_block(segment_high, act_func=activation, scope='segment_high2')
+        #segment_high = layers.conv(segment_high, scope='segment_high3', filter_dims=[1, 1, 8],
+        #                           stride_dims=[1, 1], non_linear_fn=activation)
         segment_map = layers.conv(segment_high, scope='segment_high2', filter_dims=[1, 1, 1],
                                   stride_dims=[1, 1], non_linear_fn=tf.nn.sigmoid)
+
         # Make Less Sensitive
         if b_smoothing is True:
             segment_map = util.gaussian_smoothing(segment_map)
@@ -400,8 +435,6 @@ def segment_decoder_out(latent, activation=tf.nn.relu, norm='instance', scope='s
 def segment_decoder(lateral_layers, skip_layers, activation=tf.nn.relu, norm='instance', scope='segment_decoder',
                     b_train=False):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-        print(scope)
-
         lateral_map = lateral_layers[-1]
         _, h, w, c = lateral_map.get_shape().as_list()
 
@@ -418,7 +451,6 @@ def segment_decoder(lateral_layers, skip_layers, activation=tf.nn.relu, norm='in
         alpha, beta = tf.split(ada_map, 2, axis=-1)
 
         lateral_map = alpha * lateral_map + beta * skip_map
-
         lateral_map = layers.conv(lateral_map, scope='feature_concat', filter_dims=[3, 3, segment_unit_block_depth],
                                   stride_dims=[1, 1], non_linear_fn=None)
         lateral_map = layers.conv_normalize(lateral_map, norm=norm, b_train=b_train,
@@ -478,6 +510,40 @@ def segment_decoder(lateral_layers, skip_layers, activation=tf.nn.relu, norm='in
         return psp_lateral
 
 
+def spatial_memory(query, size, dims, scope='spatial_aug_mem'):
+    with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
+        aug_mem = tf.get_variable('mem_vars', [size, dims], dtype=tf.float32,
+                                  initializer=tf.random_normal_initializer)
+        train_logger.debug(scope + ' mem size: ' + str(aug_mem.get_shape().as_list()))
+        # query = [B, H, W, R], aug_mem = [Q, R]
+        norm_q = tf.nn.l2_normalize(query, axis=[0, 1, 2])
+        train_logger.debug(scope + ' norm_q: ' + str(norm_q.get_shape().as_list()))
+        norm_mem = tf.nn.l2_normalize(aug_mem, axis=0)
+        train_logger.debug(scope + ' norm mem: ' + str(norm_mem.get_shape().as_list()))
+
+        _, h, w, dim = norm_q.get_shape().as_list()
+        norm_q = tf.reshape(norm_q, [-1, dim])
+
+        distance = tf.matmul(norm_q, norm_mem, transpose_b=True)  # [B x H x W, Q]
+
+        sm = tf.nn.softmax(distance, axis=-1)  # [B x H x W, Q]
+        train_logger.debug(scope + ' softmax: ' + str(sm.get_shape().as_list()))
+        threashold = tf.constant(1 / aug_mem_size, dtype=tf.float32)
+        attention = tf.multiply(tf.nn.relu(sm - threashold), sm)
+        attention = attention / (1e-7 + tf.abs(sm - threashold))
+        train_logger.debug(scope + ' attention: ' + str(attention.get_shape().as_list()))
+        l1 = tf.expand_dims(tf.reduce_sum(attention, axis=-1), axis=-1)
+        # print(scope + ' l1: ' + str(l1.get_shape().as_list()))
+        attention = attention / (l1 + 1e-7)
+
+        latent = tf.matmul(attention, aug_mem)  # [B x H x W, Q] x [Q, R] = [B x H x W, R]
+        latent = tf.reshape(latent, shape=[-1, h, w, dim])
+        # norm_q = tf.reshape(norm_q, shape=[-1, h, w, dim])
+        # latent = tf.add(latent, norm_q)
+        train_logger.debug(scope + ' latent: ' + str(latent.get_shape().as_list()))
+        return attention, latent
+
+
 def categorical_sample(logits):
     u = tf.random_uniform(tf.shape(logits))
     return tf.argmax(logits - tf.log(-tf.log(u)), axis=-1)
@@ -503,15 +569,14 @@ def create_roi_mask(width, height, offset=60):
 
 
 def train(model_path='None', mode='train'):
-    print('Please wait. Preparing to start training...')
+    train_logger.info('Please wait. Preparing to start training...')
     train_start_time = time.time()
-
     #cutout_mask = create_roi_mask(input_width, input_height, offset=16)
     outlier_files = []
     if use_outlier_samples is True:
         # Classes
         raw_aug_files = os.listdir(aug_data)
-        print('Load augmentation samples, Total Num of Samples: ' + str(len(raw_aug_files)))
+        train_logger.info('Load augmentation samples, Total Num of Samples: ' + str(len(raw_aug_files)))
 
         for a_file in raw_aug_files:
             a_file_path = os.path.join(aug_data, a_file).replace("\\", "/")
@@ -527,40 +592,45 @@ def train(model_path='None', mode='train'):
 
     X_IN = tf.placeholder(tf.float32, [None, input_height, input_width, num_channel])
     S_IN = tf.placeholder(tf.float32, [None, input_height, input_width, 1])
+
     B_TRAIN = True
     LR = tf.placeholder(tf.float32, None)
+    S_IN_Small = tf.image.resize_images(S_IN, size=[input_height // 4, input_width // 4])
+    S_IN_1K = tf.image.resize_images(S_IN, size=[input_height // 2, input_width // 2])
 
     input_feature = segment_encoder_init(X_IN, norm='instance', scope=SEGMENT_Encoder_Init_scope,
                                          activation=layers.swish, b_train=B_TRAIN)
     laterals, features = segment_encoder(input_feature, norm='instance', scope=SEGMENT_Encoder_scope,
                                          activation=layers.swish, b_train=B_TRAIN)
+    #mem_atn, mem_latent = spatial_memory(laterals[-1], size=aug_mem_size, dims=query_dimension,
+    #                                     scope=SPARTIAL_Memory_scope)
+
     segment_feature = segment_decoder(laterals, features, norm='instance', activation=layers.swish,
                                       scope=SEGMENT_Decoder_scope, b_train=B_TRAIN)
     U_G_X, U_G_X_Small = segment_decoder_out(segment_feature, norm='instance', activation=layers.swish,
                                              scope=SEGMENT_Decoder_Out_scope, b_train=B_TRAIN, b_smoothing=False)
-    print('Segment decoder images: ' + str(U_G_X.get_shape().as_list()))
-    segment_residual_loss = 0.0
-    S_IN_Small = tf.image.resize_images(S_IN, size=[input_height // 4, input_width // 4])
+    train_logger.info('Segment decoder images: ' + str(U_G_X.get_shape().as_list()))
 
+    Segment_out_map, _ = segment_decoder_out(segment_feature, norm='instance', activation=layers.swish,
+                                             scope=SEGMENT_Decoder_Out_scope, b_train=False, b_smoothing=True)
+    segment_residual_loss = 0.0
     segment_residual_loss += get_residual_loss(U_G_X_Small, S_IN_Small, type='focal')  # Deep Supervision
     # segment_residual_loss += get_residual_loss(U_G_X_Small, S_IN_Small, type='ft', alpha=0.7)
-    segment_residual_loss += get_residual_loss(U_G_X, S_IN, type='l1_focal')
-    segment_residual_loss += get_residual_loss(U_G_X, S_IN, type='ft', alpha=0.7)
+    segment_residual_loss += get_residual_loss(U_G_X, S_IN_1K, type='l1_focal')
+    segment_residual_loss += get_residual_loss(U_G_X, S_IN_1K, type='ft', alpha=0.7)
 
     segment_encoder_init_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=SEGMENT_Encoder_Init_scope)
     segment_encoder_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=SEGMENT_Encoder_scope)
     segment_decoder_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=SEGMENT_Decoder_scope)
     segment_decoder_out_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=SEGMENT_Decoder_Out_scope)
     segment_generator_vars = segment_encoder_init_vars + segment_encoder_vars + segment_decoder_vars + segment_decoder_out_vars
-    train_vars = segment_decoder_vars + segment_decoder_out_vars
-
     # Optimizer
     l2_lambda = 0
     l2_weight_decay = tf.reduce_mean([tf.nn.l2_loss(v) for v in segment_generator_vars])
 
     segment_loss = segment_residual_loss + l2_lambda * l2_weight_decay
     segmentation_optimizer = tf.train.AdamOptimizer(learning_rate=LR).minimize(segment_loss,
-                                                                               var_list=train_vars)
+                                                                               var_list=segment_generator_vars)
     config = tf.ConfigProto(allow_soft_placement=True)
     config.gpu_options.allow_growth = True
 
@@ -572,46 +642,49 @@ def train(model_path='None', mode='train'):
     segment_decoder_out_saver = tf.train.Saver(segment_decoder_out_vars)
     segment_generator_saver = tf.train.Saver(segment_generator_vars)
 
+    tf.add_to_collection('input', X_IN)
+    tf.add_to_collection('output', Segment_out_map)
+
     with tf.Session(config=config) as sess:
         sess.run(tf.global_variables_initializer())
         try:
-            print('Loading segment encoder init...')
+            train_logger.info('Loading segment encoder init...')
             segment_encoder_init_saver.restore(sess, segment_model_path)
-            print('Success to load segment encoder init.')
+            train_logger.info('Success to load segment encoder init.')
         except:
-            print('Fail to load segment encoder init.')
+            train_logger.error('Fail to load segment encoder init.')
 
         try:
-            print('Loading segment encoder...')
+            train_logger.info('Loading segment encoder...')
             segment_encoder_saver.restore(sess, segment_model_path)
-            print('Success to load segment encoder.')
+            train_logger.info('Success to load segment encoder.')
         except:
-            print('Fail to load segment encoder.')
+            train_logger.error('Fail to load segment encoder.')
 
         try:
-            print('Loading segment decoder...')
+            train_logger.info('Loading segment decoder...')
             segment_decoder_saver.restore(sess, segment_model_path)
-            print('Success to load segment decoder.')
+            train_logger.info('Success to load segment decoder.')
         except:
-            print('Fail to load segment decoder.')
+            train_logger.error('Fail to load segment decoder.')
 
         try:
-            print('Loading segment decoder map...')
+            train_logger.info('Loading segment decoder map...')
             segment_decoder_out_saver.restore(sess, segment_model_path)
-            print('Success to load segment decoder map.')
+            train_logger.info('Success to load segment decoder map.')
         except:
-            print('Fail to load segment decoder map.')
+            train_logger.error('Fail to load segment decoder map.')
 
         tr_dir = train_data
         up_dir = update_data
 
         # Classes
         classes = os.listdir(tr_dir)
-        print(' Train classes: ' + str(len(classes)))
+        train_logger.info(' Train classes: ' + str(len(classes)))
 
         if mode == 'update':
             update_classes = os.listdir(up_dir)
-            print(' Update classes: ' + str(len(update_classes)))
+            train_logger.info(' Update classes: ' + str(len(update_classes)))
 
         # Supervised Settings
         labeled_list_X = os.listdir('data/supervised/X')
@@ -634,7 +707,7 @@ def train(model_path='None', mode='train'):
         for e in range(num_epoch):
             itr = 0
 
-            if use_semisupervised is True and e % 4 == 0 :
+            if use_semisupervised is True:
                 sup_X, sup_Y = shuffle(labeled_X, labeled_Y)
 
                 training_batch = zip(range(0, len(sup_X), batch_size),
@@ -653,21 +726,25 @@ def train(model_path='None', mode='train'):
                         labeled_img_Y = np.flip(labeled_img_Y, flip_axis)
 
                     _, u_loss, u_g_x_imgs = sess.run([segmentation_optimizer, segment_loss, U_G_X],
-                                                     feed_dict={X_IN: labeled_img_X, S_IN: labeled_img_Y, LR: lr})
+                                                     feed_dict={X_IN: labeled_img_X, S_IN: labeled_img_Y,
+                                                                LR: lr})
                     itr += 1
-                    print('supervised epoch: ' + str(e) + ', segment loss: ' + str(u_loss))
+                    train_logger.info('supervised epoch: ' + str(e) + ', segment loss: ' + str(u_loss))
                     if itr % 10 == 0:
+                        #img_hsv = np.uint8(255 * labeled_img_X[0])
+                        #img_bgr = cv2.cvtColor(img_hsv, cv2.COLOR_HSV2BGR)
                         cv2.imwrite(out_dir + '/' + str(itr) + '.jpg', 255 * labeled_img_X[0])
                         cv2.imwrite(out_dir + '/' + str(itr) + '_gt.jpg', 255 * labeled_img_Y[0])
                         cv2.imwrite(out_dir + '/' + str(itr) + '_pred.jpg', 255 * u_g_x_imgs[0])
 
                     if itr % 30 == 0:
                         try:
-                            print('Saving model...')
-                            segment_generator_saver.save(sess, segment_model_path, write_meta_graph=False)
-                            print('Saved.')
+                            train_logger.info('Saving model...')
+                            #segment_generator_saver.save(sess, segment_model_path, write_meta_graph=False)
+                            segment_generator_saver.save(sess, segment_model_path)
+                            train_logger.info('Saved.')
                         except:
-                            print('Save failed')
+                            train_logger.error('Save failed')
 
             tr_files = []
             for cls in classes:
@@ -688,7 +765,7 @@ def train(model_path='None', mode='train'):
                     for s in samples:
                         sample_path = os.path.join(class_path, s).replace("\\", "/")
                         tr_files.append(sample_path)
-            print(' Num samples per epoch: ' + str(len(tr_files)))
+            train_logger.info(' Num samples per epoch: ' + str(len(tr_files)))
             total_input_size = len(tr_files)
             warm_lr_epoch = num_epoch // 10
             warm_lr_steps = warm_lr_epoch * (total_input_size // batch_size)
@@ -712,19 +789,21 @@ def train(model_path='None', mode='train'):
                 b_use_bg_samples = use_bg_samples
                 train_with_normal_sample = True
 
-                if np.random.randint(1, 10) < 2:
+                if np.random.randint(1, 10) < 3:
                     b_use_outlier_samples = False
+
+                b_use_color_shift = False
 
                 if b_use_outlier_samples is True:
                     s_t = time.time()
                     sample_outlier_files = np.random.choice(outlier_files, size=1) # size=np.random.random_integers(low=1, high=7))
-                    sample_outlier_imgs, _, _ = load_images(sample_outlier_files, flip=True)
+                    sample_outlier_imgs, _, _ = load_images(sample_outlier_files, flip=True, rotate=True)
                     sample_outlier_imgs = np.sum(sample_outlier_imgs, axis=0)
                     # sample_outlier_imgs = aug_noise + sample_outlier_imgs
                     aug_noise = sample_outlier_imgs
                     aug_noise = np.where(aug_noise > 0.9, 1.0, 0.0)
                     b_use_cutdout = False
-                    print('Elapsed Time load outlier samples is True  ' + str(time.time() - s_t) + ' sec')
+                    train_logger.debug('Elapsed Time load outlier samples is True  ' + str(time.time() - s_t) + ' sec')
                 else:
                     # Perlin Noise
                     s_t = time.time()
@@ -738,21 +817,21 @@ def train(model_path='None', mode='train'):
                     perlin_noise = np.where(noise > np.average(noise), 1.0, 0.0)
                     perlin_noise = np.expand_dims(perlin_noise, axis=-1)
                     aug_noise = perlin_noise
-                    print('Elapsed Time Perlin Noise  ' + str(time.time() - s_t) + ' sec')
+                    train_logger.debug('Elapsed Time Perlin Noise  ' + str(time.time() - s_t) + ' sec')
                     # aug_noise = None
 
                 if train_with_normal_sample is True:
                     s_t = time.time()
                     batch_imgs, gt_imgs, seg_imgs = load_images(tr_files[start + 1:end],
                                                                 flip=True, noise_mask=aug_noise,
-                                                                cutout=b_use_cutdout)
-                    print('Elapsed Time load 1 sample  ' + str(time.time() - s_t) + ' sec')
+                                                                cutout=b_use_cutdout, rotate=True)
+                    train_logger.debug('Elapsed Time load 1 sample  ' + str(time.time() - s_t) + ' sec')
                 else:
                     s_t = time.time()
                     batch_imgs, gt_imgs, seg_imgs = load_images(tr_files[start:end],
                                                                 flip=True, noise_mask=aug_noise,
-                                                                cutout=b_use_cutdout)
-                    print('Elapsed Time load batch samples  ' + str(time.time() - s_t) + ' sec')
+                                                                cutout=b_use_cutdout, rotate=True)
+                    train_logger.debug('Elapsed Time load batch samples  ' + str(time.time() - s_t) + ' sec')
                 seg_imgs = np.where(seg_imgs > 0, 1.0, 0.0)
 
                 if b_use_bg_samples is True:
@@ -784,29 +863,32 @@ def train(model_path='None', mode='train'):
                     batch_imgs = fg + bg
                     seg_imgs = seg_imgs + noise_sample_segments
                     seg_imgs = np.where(seg_imgs > 0, 1.0, 0.0)
-                    print('Elapsed Time blending samples  ' + str(time.time() - s_t) + ' sec')
+                    train_logger.debug('Elapsed Time blending samples  ' + str(time.time() - s_t) + ' sec')
 
                 if train_with_normal_sample is True:
                     s_t = time.time()
                     b_img, gt, seg = load_images([tr_files[start]], flip=True,
-                                                 noise_mask=None, cutout=False)
+                                                 noise_mask=None, cutout=False, rotate=True)
                     batch_imgs = np.append(batch_imgs, b_img, axis=0)
                     gt_imgs = np.append(gt_imgs, gt, axis=0)
                     seg_imgs = np.append(seg_imgs, seg, axis=0)
-                    print('Elapsed Time load 1 normal sample  ' + str(time.time() - s_t) + ' sec')
+                    train_logger.debug('Elapsed Time load 1 normal sample  ' + str(time.time() - s_t) + ' sec')
 
                 batch_imgs, gt_imgs, seg_imgs = shuffle(batch_imgs, gt_imgs, seg_imgs)
 
                 _, segment_g_loss, u_g_x_imgs = sess.run([segmentation_optimizer, segment_loss, U_G_X],
-                                                         feed_dict={X_IN: batch_imgs, S_IN: seg_imgs, LR: lr})
-                print('unsupervised epoch: ' + str(e) + ', segment loss: ' + str(segment_g_loss))
+                                                         feed_dict={X_IN: batch_imgs, S_IN: seg_imgs,
+                                                                    LR: lr})
+                train_logger.info('unsupervised epoch: ' + str(e) + ', segment loss: ' + str(segment_g_loss))
 
                 if itr % 10 == 0:
+                    #img_hsv = np.uint8(255 * batch_imgs[0])
+                    #img_bgr = cv2.cvtColor(img_hsv, cv2.COLOR_HSV2BGR)
                     cv2.imwrite(out_dir + '/' + str(itr) + '.jpg', 255 * batch_imgs[0])
                     cv2.imwrite(out_dir + '/' + str(itr) + '_gt.jpg', 255 * seg_imgs[0])
                     cv2.imwrite(out_dir + '/' + str(itr) + '_pred.jpg', 255 * u_g_x_imgs[0])
                     # cv2.imwrite(out_dir + '/' + str(itr) + '_recon.jpg', 255 * g_x_imgs[0])
-                    print('Elapsed Time at  ' + str(e) + '/' + str(num_epoch) + ' epochs, ' +
+                    train_logger.info('Elapsed Time at  ' + str(e) + '/' + str(num_epoch) + ' epochs, ' +
                           str(time.time() - train_start_time) + ' sec')
 
             te_batch = zip(range(0, len(te_files), batch_size),
@@ -819,13 +901,14 @@ def train(model_path='None', mode='train'):
                 for i in range(batch_size):
                     cv2.imwrite('out/' + te_files[t_s + i], 255 * u_gx_imgs[i])
                     s = np.sum(u_gx_imgs[i])
-                    print('anomaly score of ' + te_files[t_s + i] + ': ' + str(s))
+                    train_logger.info('anomaly score of ' + te_files[t_s + i] + ': ' + str(s))
             try:
-                print('Saving model...')
-                segment_generator_saver.save(sess, segment_model_path, write_meta_graph=False)
-                print('Saved.')
+                train_logger.info('Saving model...')
+                #segment_generator_saver.save(sess, segment_model_path, write_meta_graph=False)
+                segment_generator_saver.save(sess, segment_model_path)
+                train_logger.info('Saved.')
             except:
-                print('Save failed')
+                train_logger.error('Save failed')
 
 
 def calculate_anomaly_score(img, width, height, filter_size=16):
@@ -850,42 +933,30 @@ def calculate_anomaly_score(img, width, height, filter_size=16):
 
 
 def test(model_path):
-    print('Please wait. Preparing to test...')
-
+    test_logger.info('Please wait. Preparing to test...')
     tf.reset_default_graph()
-
-    X_IN = tf.placeholder(tf.float32, [None, input_height, input_width, num_channel])
-    B_TRAIN = False
-
-    input_feature = segment_encoder_init(X_IN, norm='instance', scope=SEGMENT_Encoder_Init_scope,
-                                         activation=layers.swish, b_train=B_TRAIN)
-    laterals, features = segment_encoder(input_feature, norm='instance', scope=SEGMENT_Encoder_scope,
-                                         activation=layers.swish, b_train=B_TRAIN)
-    segment_feature = segment_decoder(laterals, features, norm='instance', activation=layers.swish,
-                                      scope=SEGMENT_Decoder_scope, b_train=B_TRAIN)
-    U_G_X, _ = segment_decoder_out(segment_feature, norm='instance', activation=layers.swish,
-                                   scope=SEGMENT_Decoder_Out_scope, b_train=B_TRAIN, b_smoothing=True)
-
-    segment_encoder_init_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=SEGMENT_Encoder_Init_scope)
-    segment_decoder_out_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=SEGMENT_Decoder_Out_scope)
-    segment_encoder_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=SEGMENT_Encoder_scope)
-    segment_decoder_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=SEGMENT_Decoder_scope)
-    segment_generator_vars = segment_encoder_init_vars + segment_encoder_vars + segment_decoder_vars + segment_decoder_out_vars
 
     config = tf.ConfigProto(allow_soft_placement=True)
     config.gpu_options.allow_growth = True
 
-    segment_model_path = os.path.join(model_path, 'm.chpt').replace("\\", "/")
-    segment_generator_saver = tf.train.Saver(segment_generator_vars)
+    carnet_meta = os.path.join(model_path, 'm.chpt.meta').replace("\\", "/")
+    test_logger.info('Loading graph...')
+    carnet = tf.train.import_meta_graph(carnet_meta)
+    test_logger.info('Success to load.')
+    carnet_data = os.path.join(model_path, 'm.chpt').replace("\\", "/")
 
     with tf.Session(config=config) as sess:
         try:
-            print('Loading model...')
-            segment_generator_saver.restore(sess, segment_model_path)
-            print('Success to load.')
+            test_logger.info('Loading model...')
+            carnet.restore(sess, carnet_data)
+            test_logger.info('Success to load.')
         except:
-            print('Fail to load.')
+            test_logger.error('Fail to load.')
             return
+
+        input = tf.get_collection('input')[0]
+        output = tf.get_collection('output')[0]
+
         test_start_time = time.time()
         te_dir = test_data
         te_files = os.listdir(te_dir)
@@ -894,14 +965,14 @@ def test(model_path):
 
         for t_s, t_e in te_batch:
             test_imgs, _, _ = load_images(te_files[t_s:t_e], base_dir=te_dir)
-            u_gx_imgs = sess.run(U_G_X, feed_dict={X_IN: test_imgs})
+            u_gx_imgs = sess.run(output, feed_dict={input: test_imgs})
             u_gx_imgs = np.where(u_gx_imgs > 0.5, u_gx_imgs, 0.0)
             for i in range(batch_size):
                 cv2.imwrite('out/' + te_files[t_s + i], 255 * u_gx_imgs[i])
                 s = np.sum(u_gx_imgs[i])
-                print('anomaly score of ' + te_files[t_s + i] + ': ' + str(s))
+                test_logger.info('anomaly score of ' + te_files[t_s + i] + ': ' + str(s))
 
-        print('Total ' + str(len(te_files)) + ' Samples. Elapsed Time:  ' + str(time.time() - test_start_time) + ' sec')
+        test_logger.info('Total ' + str(len(te_files)) + ' Samples. Elapsed Time:  ' + str(time.time() - test_start_time) + ' sec')
 
 
 if __name__ == '__main__':
@@ -949,6 +1020,8 @@ if __name__ == '__main__':
     num_samples_per_class = 4
     use_semisupervised = True
     use_domain_std = False
+    aug_mem_size = 128
+    query_dimension = segment_unit_block_depth
 
     if mode == 'test':
         test(model_path)
