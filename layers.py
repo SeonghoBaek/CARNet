@@ -213,7 +213,7 @@ def depthwise_conv(input, filter_dims, stride_dims, padding='SAME', pad=0, non_l
         return activation
 
 
-def group_conv(input, scope='group_conv', num_groups=2, padding='SAME', pad=1):
+def group_conv(input, scope='group_conv', num_groups=2, padding='SAME', pad=1,  b_train=True):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
         B, H, W, C = input.get_shape().as_list()
         num_channel_out = C
@@ -225,12 +225,12 @@ def group_conv(input, scope='group_conv', num_groups=2, padding='SAME', pad=1):
         l = tf.transpose(l, perm=[3, 0, 1, 2, 4])
         gl = l[0]
         gl_conv = conv(gl, scope='gr_conv_0', filter_dims=[3, 3, num_channel_out_group],
-                       stride_dims=[1, 1], non_linear_fn=None, padding=padding, pad=pad)
+                       stride_dims=[1, 1], non_linear_fn=None, padding=padding, pad=pad, b_train=b_train)
 
         for i in range(num_groups - 1):
             gl = l[i + 1]
             gl = conv(gl, scope='gr_conv_' + str(i + 1), filter_dims=[3, 3, num_channel_out_group],
-                      stride_dims=[1, 1], non_linear_fn=None, padding=padding, pad=pad)
+                      stride_dims=[1, 1], non_linear_fn=None, padding=padding, pad=pad, b_train=True)
             gl_conv = tf.concat([gl_conv, gl], axis=-1)
 
         return gl_conv
@@ -748,8 +748,8 @@ def AdaIN(x, s_mu, s_var, scope="adain"):
 
         mean, var = tf.nn.moments(x, [1, 2], keep_dims=True)
         # print('adaIN ' + str(mean.get_shape().as_list()))
-
-        x = s_mu * (x - mean) * tf.rsqrt(var + eps) + s_var
+        s_var = tf.sqrt(s_var + eps)
+        x = tf.nn.batch_normalization(x, mean, var, offset=s_mu, scale=s_var, variance_epsilon=eps)
 
     return x
 
@@ -843,6 +843,7 @@ def ca_block(input, ratio=8, act_func=tf.nn.relu, scope='cord_attention'):
         # print('excitate h: ' + str(l_h.get_shape().as_list()))
         l_w = conv(l_w, scope='excitate_w', filter_dims=[1, 1, c], stride_dims=[1, 1],
                    non_linear_fn=tf.nn.sigmoid)
+
         # print('excitate w: ' + str(l_w.get_shape().as_list()))
         #ca = l_h * input
         #ca = l_w * ca
