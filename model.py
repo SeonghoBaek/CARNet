@@ -413,15 +413,11 @@ def segment_decoder_out(latent, activation=tf.nn.relu, norm='instance', scope='s
         segment_high = layers.conv(latent, scope='upsacle_conv_average_map',
                                    filter_dims=[3, 3, r * r * segment_unit_block_depth],
                                    stride_dims=[1, 1], non_linear_fn=None)
+        segment_high = tf.nn.depth_to_space(segment_high, r)
         segment_high = layers.conv_normalize(segment_high, norm=norm, b_train=b_train, scope='segment_high_map_norm')
         segment_high = activation(segment_high)
-        segment_high = tf.nn.depth_to_space(segment_high, r)
-
         segment_high = layers.conv(segment_high, scope='segment_high1', filter_dims=[1, 1, 16],
                                    stride_dims=[1, 1], non_linear_fn=activation)
-        #segment_high = layers.ca_block(segment_high, act_func=activation, scope='segment_high2')
-        #segment_high = layers.conv(segment_high, scope='segment_high3', filter_dims=[1, 1, 8],
-        #                           stride_dims=[1, 1], non_linear_fn=activation)
         segment_map = layers.conv(segment_high, scope='segment_high2', filter_dims=[1, 1, 1],
                                   stride_dims=[1, 1], non_linear_fn=tf.nn.sigmoid)
 
