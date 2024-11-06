@@ -728,30 +728,36 @@ def instance_norm(x, scope="instance_norm", alpha_start=1.0, bias_start=0.0):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
         b, h, w, num_ch = x.get_shape().as_list()
         eps = 1e-6
-        mean, sigma = tf.nn.moments(x, [1, 2], keep_dims=True)
+        mean, vars = tf.nn.moments(x, [1, 2], keep_dims=True)
         # print('mean: ' + str(mean.get_shape().as_list()) + ', num_ch: ' + str(num_ch))
-
-        alpha = tf.get_variable('alpha', shape=[1, 1, 1, num_ch], dtype=tf.float32,
-                                initializer=tf.constant_initializer(alpha_start))
-        bias = tf.get_variable('bias', [1, 1, 1, num_ch],
-                               initializer=tf.constant_initializer(bias_start), dtype=tf.float32)
+        scale = tf.get_variable('alpha', initializer=tf.constant(alpha_start, shape=[num_ch]))
+        #scale = tf.get_variable('alpha', [1, 1, 1, num_ch],
+        #                       initializer=tf.constant_initializer(alpha_start), dtype=tf.float32)
+        offset = tf.get_variable('bias', initializer=tf.constant(bias_start, shape=[num_ch]))
+        #offset = tf.get_variable('bias', [1, 1, 1, num_ch],
+        #                       initializer=tf.constant_initializer(bias_start), dtype=tf.float32)
         # print('alpha: ' + str(alpha.get_shape().as_list()) + ', bias: ' + str(bias.get_shape().as_list()))
-        # y = alpha * tf.div((x - mean), tf.rsqrt(sigma + eps)) + bias
-        y = tf.nn.batch_normalization(x, mean, sigma, offset=bias, scale=alpha, variance_epsilon=eps)
-
+        #y = scale * tf.div((x - mean), tf.rsqrt(vars + eps)) + offset
+        y = tf.nn.batch_normalization(x, mean, vars, offset=offset, scale=scale, variance_epsilon=eps)
+        
     return y
 
 
 def AdaIN(x, s_mu, s_var, scope="adain"):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-        eps = 1e-5
-
-        mean, var = tf.nn.moments(x, [1, 2], keep_dims=True)
-        # print('adaIN ' + str(mean.get_shape().as_list()))
+        b, h, w, num_ch = x.get_shape().as_list()
+        eps = 1e-6
+        mean, vars = tf.nn.moments(x, [1, 2], keep_dims=True)
+        # print('mean: ' + str(mean.get_shape().as_list()) + ', num_ch: ' + str(num_ch))
+        # print('alpha: ' + str(alpha.get_shape().as_list()) + ', bias: ' + str(bias.get_shape().as_list()))
+        # y = alpha * tf.div((x - mean), tf.rsqrt(sigma + eps)) + bias
         s_var = tf.sqrt(s_var + eps)
-        x = tf.nn.batch_normalization(x, mean, var, offset=s_mu, scale=s_var, variance_epsilon=eps)
+        scale = s_var
+        offset = s_mu
+        #y = scale * tf.div((x - mean), tf.rsqrt(vars + eps)) + offset
+        y = tf.nn.batch_normalization(x, mean, vars, offset=offset, scale=scale, variance_epsilon=eps)
 
-    return x
+    return y
 
 
 def add_residual_dense_block(in_layer, filter_dims, num_layers, act_func=tf.nn.relu, norm='layer', b_train=False,
