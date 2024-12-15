@@ -1,6 +1,6 @@
 # CARNet: Coordinate Attention Residual Block Network for HR Image Segmentation
 # Author: Seongho Baek
-# e-mail: seongho.baek@sk.com
+# e-mail: seonghobaek@gmail.com
 
 USE_TF_2 = False
 
