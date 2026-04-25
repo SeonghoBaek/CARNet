@@ -851,9 +851,9 @@ def ca_block(input, ratio=8, act_func=tf.nn.relu, scope='cord_attention'):
                    non_linear_fn=tf.nn.sigmoid)
 
         # print('excitate w: ' + str(l_w.get_shape().as_list()))
-        #ca = l_h * input
-        #ca = l_w * ca
-        ca = 0.5 * (l_h * input + l_w * input)
+
+        ca = l_h * l_w * input
+        #ca = 0.5 * (l_h * input + l_w * input)
 
         return ca
 
